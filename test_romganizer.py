@@ -877,7 +877,9 @@ def test_dry_run_reports_collisions_between_its_own_files():
         assert 'extra: 1' in r.stdout, r.stdout       # same name, different bytes
         assert not (root / 'dest' / 'roms').exists(), 'a dry run wrote something'
 
-def test_saves_are_never_pulled_into_the_library():
+def test_a_single_game_leaves_emulator_saves_behind():
+    # A lone rom must still leave its save/state/nvram files where the emulator
+    # already looks for them -- there is no sibling rom to hide that behind.
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         src = root / 'backup'
@@ -1153,7 +1155,6 @@ def test_saves_beside_their_rom_are_not_carried_with_the_library():
 
 def test_save_extensions_are_recognised_outside_a_saves_directory():
     with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
         for ext in ('.srm', '.eep', '.mpk', '.nv', '.state', '.state2', '.sav'):
             assert in_saves(Path(td) / f'game{ext}'), ext
         for ext in ('.sfc', '.iso', '.7z', '.nes', '.z80'):
