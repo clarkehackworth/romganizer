@@ -350,6 +350,36 @@ def test_archive_unpacked_for_systems_that_cannot_read_one():
         assert not game.exists(), r.stdout
 
 
+def test_7z_is_unpacked_before_identification():
+    """A .7z is opaque to grouping and dup detection, so it is unpacked first --
+    except an arcade set, which MAME loads as the .7z itself."""
+    if not shutil.which('7z'):
+        print('    (skipped: 7z not installed)')
+        return
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src, dest, build = root / 'src', root / 'dest', root / 'build'
+        (src / 'PS2').mkdir(parents=True)
+        (src / 'mame').mkdir(parents=True)
+        touch(build / 'Sly Cooper (USA).iso', b'\0' * 3000)
+        touch(build / 'sf2.rom', b'\0' * 500)
+        for member, into in ((build / 'Sly Cooper (USA).iso', src / 'PS2' / 'Sly Cooper (USA).7z'),
+                             (build / 'sf2.rom', src / 'mame' / 'sf2.7z')):
+            subprocess.run(['7z', 'a', str(into), str(member)], capture_output=True, check=True)
+
+        r = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / 'romganizer.py'),
+             str(src), str(dest), '--mode', 'move'], capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout
+        # the ps2 archive: unpacked, and the path hint above it survived the trip
+        assert (dest / 'roms' / 'ps2' / 'Sly Cooper (USA)' / 'Sly Cooper (USA).iso').exists(), r.stdout
+        assert not (src / 'PS2' / 'Sly Cooper (USA).7z').exists(), r.stdout
+        # the arcade set stays sealed
+        assert list(dest.rglob('sf2.7z')), r.stdout
+        # staging never survives a clean run
+        assert not (dest / '.romganizer-staging').exists(), r.stdout
+
+
 def test_folder_marker_claims_a_whole_rip():
     """A PS3 rip has no telling extension anywhere; PS3_DISC.SFB names the folder."""
     with tempfile.TemporaryDirectory() as td:

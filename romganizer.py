@@ -1237,8 +1237,8 @@ def main():
 
     # Phase 2: classify (opens every .zip, so it is not free).
     resolved, notes = {}, {}
-    start = time.monotonic()
-    for i, p in enumerate(files, 1):
+
+    def identify(p):
         resolved[p], evidence = classify(p)
         tool = EXTRACTORS.get(p.suffix.lower(), (None,))[0]
         if resolved[p] in ('ambiguous', 'unknown') and tool and shutil.which(tool):
@@ -1254,8 +1254,89 @@ def main():
             progress_clear()
             print(f"[{kind.upper()}] {p.resolve()}")
             print(f"{'->':>10} {evidence[0]}; filing as {resolved[p]}")
+
+    start = time.monotonic()
+    for i, p in enumerate(files, 1):
+        identify(p)
         progress("Identifying", i, len(files), start=start)
     progress_clear()
+
+    # Phase 2b: a .7z hides everything from the phases below -- the system comes
+    # off the path alone, and folder grouping, DAT matching and duplicate
+    # detection all see one opaque blob. Unpack it into staging on the
+    # destination filesystem (so the real move is a rename) and identify what was
+    # actually inside. Arcade and NeoGeo are the exception: MAME loads those sets
+    # AS .7z, so they stay sealed.
+    staging = dest_base / '.romganizer-staging'
+    sealed = ('arcade', 'neogeo')
+    # The path decides what stays sealed, not the contents: a MAME set's members
+    # are bare .rom/.bin files that classify as anything at all, so only "mame/"
+    # or "arcade/" above it can be trusted to say "this IS the romset".
+    todo = [p for p in files if p.suffix.lower() == '.7z'
+            and resolved[p] not in sealed
+            and not set(_hint_votes(p, set())) & set(sealed)]
+    dropped, added = set(), []
+    start = time.monotonic()
+    for i, arc in enumerate(todo, 1):
+        progress("Unpacking", i - 1, len(todo), start=start)
+        members = archive_crcs(arc)
+        try:  # 7z's listing reports sizes as text
+            need = sum(int(sz) for sz, _ in members.values()) if members else 0
+        except (TypeError, ValueError):
+            need = 0
+        try:
+            need = need or arc.stat().st_size * EXTRACT_FACTOR
+            probe = dest_base
+            while not probe.exists() and probe.parent != probe:
+                probe = probe.parent
+            free = shutil.disk_usage(probe).free
+        except OSError:
+            free = need
+        if free < need:
+            progress_clear()
+            print(f"[WARN] {arc.name}: need {_size(need)} to unpack it, "
+                  f"{_size(free)} free; identifying it sealed")
+            continue
+        if args.dry_run:
+            progress_clear()
+            print(f"[UNPACK] {arc.resolve()}  (dry run: identified sealed)")
+            continue
+        # Mirror the archive's own path under staging. Extracting to a bare
+        # directory throws away every path hint above it -- "PS2/game.7z" holds
+        # a nameless .iso, and only the "PS2/" it came from can place it.
+        home = staging / arc.parent.relative_to(arc.anchor)
+        out = home / arc.stem
+        n = 1
+        while out.exists():
+            out, n = home / f"{arc.stem}_{n}", n + 1
+        out.mkdir(parents=True)
+        if not extract_archive(arc, out):
+            shutil.rmtree(out, ignore_errors=True)
+            progress_clear()
+            print(f"[WARN] Could not unpack {arc.name}; identifying it sealed")
+            continue
+        inside = sorted(q for q in out.rglob('*') if q.is_file())
+        if not inside:
+            shutil.rmtree(out, ignore_errors=True)
+            continue
+        progress_clear()
+        print(f"[UNPACK] {arc.resolve()}")
+        print(f"{'->':>8} {len(inside)} file{'' if len(inside) == 1 else 's'} to identify")
+        dropped.add(arc)
+        for q in inside:
+            identify(q)
+            notes[q] = f"Unpacked from {arc.name}"
+            added.append(q)
+        if args.mode == 'move':
+            # Move consumes the source everywhere else too; the contents now
+            # live in staging on the destination drive.
+            try:
+                arc.unlink()
+            except OSError:
+                pass
+    progress_clear()
+    if dropped or added:
+        files = sorted([p for p in files if p not in dropped] + added)
 
     # Sidecars (.bin tracks beside a .cue) inherit whatever their folder resolved
     # to, so a disc set is not split across systems or dropped as ambiguous.
@@ -1379,7 +1460,7 @@ def main():
     # collide unless each keeps its own directory. Artwork and readmes stay
     # skipped: those are known to be droppable, an unrecognized extension is not.
     # Outermost first, so "Quake/id1" is claimed by "Quake" rather than itself.
-    roots = {s.resolve() for s in sources if s.is_dir()}
+    roots = {s.resolve() for s in sources if s.is_dir()} | {staging.resolve()}
 
     def holds_a_dump(path):
         return any(p.suffix.lower() in ROM_EXTS and resolved[p] not in ('unknown', 'ambiguous')
@@ -1750,6 +1831,14 @@ def main():
         changelog.append({"source": str(file_path), "destination": str(final_dest), "action": action_taken, "status": status, "reason": log_reason})
 
     progress_clear()
+    if staging.exists():
+        leftover = [p for p in staging.rglob('*') if p.is_file()]
+        if leftover:
+            # Never delete these: in move mode the archive they came from is gone.
+            print(f"\n[WARN] {len(leftover)} unpacked file(s) never made it out of "
+                  f"{staging}; left there rather than deleted")
+        else:
+            shutil.rmtree(staging, ignore_errors=True)
     log_filename = str(dest_base / f"rom_organization_changelog.{args.changelog_format}")
     dest_base.mkdir(parents=True, exist_ok=True)
     if args.changelog_format == 'json':

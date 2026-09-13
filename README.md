@@ -133,7 +133,17 @@ folder breaks the tie (otherwise `ambiguous`).
 | `.chd` | unpacked to a temp copy | `chdman` |
 | `.rvz` | unpacked to a temp copy | `dolphin-tool` |
 
-A `.zip`, `.7z` or `.rar` holding a **psx, ps2, ps3, gamecube or switch** dump is
+A `.7z` is unpacked into `dest/.romganizer-staging/` *before* identification runs,
+and its contents are identified individually -- a sealed archive is opaque to
+folder grouping, DAT matching and duplicate detection, and its system comes off
+the path alone. The archive's own path is mirrored under staging so the hints
+above it (`PS2/`, `Sony PlayStation/`) still apply to what came out. Staging sits
+on the destination filesystem, so the real move is a rename; it is removed at the
+end of the run, and anything left in it (a failed write) is kept, not deleted.
+**Arcade and NeoGeo sets stay sealed** -- MAME loads those as the `.7z` itself --
+and so does any archive too big for the free space, or that no tool can read.
+
+A `.zip` or `.rar` holding a **psx, ps2, ps3, gamecube or switch** dump is
 unpacked into its game folder instead of being filed as an archive -- those
 emulators can't read one. Every other system keeps the archive: nes/snes/gb cores
 load a zip directly, and an arcade romset *is* a zip. Unpacking is skipped (and
