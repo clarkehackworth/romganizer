@@ -1236,15 +1236,28 @@ def main():
     # ponytail: detected per directory, not per emulator; add an emulator-layout
     # table only if a real layout breaks this.
     dir_files = {}
+    # Every file under a directory at any depth, indexed once. The folder-grouping
+    # below asks "what is under this root?" for hundreds of roots; scanning `files`
+    # each time is O(dirs x files) with a parents walk per pair -- minutes of silence
+    # on a large tree.
+    files_under = {}
     for p in files:
         dir_files.setdefault(p.parent, []).append(p)
+        for anc in p.parents:
+            files_under.setdefault(anc, []).append(p)
 
     dir_dest = {}  # source dir -> (target dir, system) for whole-folder moves
+    # One bar across the four grouping passes below: one over files, three over
+    # directories. Silence here reads as a hang on a large tree.
+    start = time.monotonic()
+    group_done, group_total = 0, len(files) + 3 * len(dir_files)
 
     # Layout-identified dumps first: the marker claims its whole folder, so the
     # per-directory rule below never gets to split one up.
     marker_roots = {}
     for p in files:
+        group_done += 1
+        progress("Grouping", group_done, group_total, start=start)
         marker = FOLDER_MARKERS.get(p.name.lower())
         if not marker or in_saves(p):
             continue
@@ -1259,11 +1272,12 @@ def main():
         # The folder name is the release name; keep it verbatim rather than
         # running it through game_stem, which would eat "[...]" title brackets.
         dir_dest[root] = (dest_base / 'roms' / marker / root.name, marker)
-        for q in files:
-            if root in q.parents:
-                resolved[q] = marker
+        for q in files_under.get(root, ()):
+            resolved[q] = marker
 
     for parent, group in dir_files.items():
+        group_done += 1
+        progress("Grouping", group_done, group_total, start=start)
         if parent in dir_dest or any(a in dir_dest for a in parent.parents):
             continue  # already claimed by a folder marker
         if in_saves(parent / '_'):
@@ -1333,6 +1347,8 @@ def main():
                    for p in dir_files.get(path, ()))
 
     for parent in sorted(dir_files, key=lambda p: len(p.parts)):
+        group_done += 1
+        progress("Grouping", group_done, group_total, start=start)
         group = dir_files[parent]
         if parent in dir_dest or parent.resolve() in roots:
             continue
@@ -1354,7 +1370,7 @@ def main():
                and root.parent.resolve() not in roots
                and not names_a_system(root.parent) and not holds_a_dump(root.parent)):
             root = root.parent
-        members = [p for p in files if root in p.parents]
+        members = files_under.get(root, [])
         systems = {resolved[p] for p in members} - {'unknown', 'ambiguous', 'bios'}
         if len(systems) > 1:
             continue
@@ -1373,6 +1389,8 @@ def main():
 
     # Nested folders inside a claimed folder ride along at the same relative path.
     for parent in dir_files:
+        group_done += 1
+        progress("Grouping", group_done, group_total, start=start)
         if parent in dir_dest:
             continue
         for anc in parent.parents:
@@ -1390,6 +1408,7 @@ def main():
     # of this same run landing on one path -- which is the collision worth
     # reporting. Every destination taken so far is remembered here, mapped to the
     # source that took it, so the duplicate/extra handling below runs either way.
+    progress_clear()
     claimed = {}       # destination file -> source file that claimed it
     claimed_dirs = set()
 
@@ -1404,7 +1423,7 @@ def main():
         if any(a in dir_dest for a in parent.parents) or target_dir.exists() \
                 or target_dir in claimed_dirs:
             continue
-        members = [p for p in files if parent in p.parents]
+        members = list(files_under.get(parent, []))
         sizes = {}
         for p in members:
             try:
