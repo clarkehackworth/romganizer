@@ -718,6 +718,60 @@ def test_dat_resolves_name_collision():
         assert (dest / 'roms' / 'nes' / 'Legend of Zelda, The (USA) (Rev B).nes').exists(), r.stdout
 
 
+def test_dat_matches_a_rom_inside_its_zip():
+    """A DAT's md5 is of the rom, not of the zip someone put it in, so every
+    zipped dump misses the DAT unless the member is hashed. The file on disk is
+    still a zip, so it keeps that extension whatever the DAT calls the rom."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src, dest = root / 'src', root / 'dest'
+        import hashlib
+        touch(dest / 'roms' / 'nes' / 'Zelda.zip', b'some other dump')
+        (src).mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(src / 'Zelda.zip', 'w') as z:
+            z.writestr('Zelda.nes', b'rev-b-bytes')
+        md5 = hashlib.md5(b'rev-b-bytes').hexdigest()
+        (root / 'nointro.dat').write_text(
+            '<datafile><game name="Zelda"><rom name="Legend of Zelda, The (USA) (Rev B).nes" '
+            f'md5="{md5.upper()}"/></game></datafile>')
+        r = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / 'romganizer.py'), str(src), str(dest),
+             '--mode', 'copy', '--dat', str(root / 'nointro.dat')], capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+        out = dest / 'roms' / 'nes' / 'Legend of Zelda, The (USA) (Rev B).zip'
+        assert out.exists(), r.stdout
+        assert zipfile.is_zipfile(out), "renamed to the rom's extension but still a zip"
+
+
+def test_discs_that_cannot_name_themselves_keep_their_folders():
+    """(Disc 2) comes off so both discs share a game folder -- but only when the
+    files inside say which disc they are. A gdi rip's track01.bin doesn't, and
+    merging would leave disc 2's index pointing at disc 1's tracks."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src, dest = root / 'src', root / 'dest'
+        for n, body in ((1, b'one'), (2, b'two')):
+            d = src / '19. Headhunter' / f'Headhunter (Disc {n} of 2)'
+            touch(d / f'Headhunter (Disc {n} of 2).gdi', b'gdi' + body)
+            touch(d / 'track01.bin', b'SEGA SEGAKATANA' + body)
+            touch(d / 'track03.bin', b'audio' + body)
+        # Named tracks still merge: that is what the disc tag comes off for.
+        for n in (1, 2):
+            d = src / 'psx' / '01. Final Fantasy VII (USA)' / f'Final Fantasy VII (USA) (Disc {n})'
+            touch(d / f'Final Fantasy VII (USA) (Disc {n}).cue', b'FILE "x" BINARY\n')
+            touch(d / f'Final Fantasy VII (USA) (Disc {n}).bin', b'psx' + bytes([n]))
+        r = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / 'romganizer.py'),
+             str(src), str(dest), '--mode', 'copy'], capture_output=True, text=True)
+        dc = dest / 'roms' / 'dreamcast'
+        assert (dc / 'Headhunter (Disc 1 of 2)' / 'track01.bin').read_bytes().endswith(b'one'), r.stdout
+        assert (dc / 'Headhunter (Disc 2 of 2)' / 'track01.bin').read_bytes().endswith(b'two'), r.stdout
+        assert not list(dest.glob('duplicates/**/track*.bin')), r.stdout
+        psx = dest / 'roms' / 'psx' / 'Final Fantasy VII (USA)'
+        assert (psx / 'Final Fantasy VII (USA) (Disc 1).bin').exists(), r.stdout
+        assert (psx / 'Final Fantasy VII (USA) (Disc 2).bin').exists(), r.stdout
+
+
 def test_parse_dat_formats():
     xml = (b'<datafile><game name="G"><rom name="G (USA).bin" md5="AABBCCDDEEFF00112233445566778899"/>'
            b'</game></datafile>')

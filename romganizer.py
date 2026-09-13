@@ -464,16 +464,33 @@ def dat_lookup(index, file_path, file_md5):
     hit = index.get(file_md5 or "")
     if hit:
         return hit
-    candidates = []
+    candidates = []   # (md5, the hash is of a rom inside an archive)
     skip = header_size(file_path)
     if skip:
-        candidates.append(calculate_hash(file_path, offset=skip))
+        candidates.append((calculate_hash(file_path, offset=skip), False))
     if is_smd(file_path):
-        candidates.append(smd_md5(file_path))
-    for md5 in candidates:
+        candidates.append((smd_md5(file_path), False))
+    if file_path.suffix.lower() == '.zip':
+        # A DAT's md5 is of the rom, not of the zip someone put it in, so every
+        # zipped dump misses unless the member is hashed. Only when there is
+        # exactly one: a MAME set is many roms and none of them is the game.
+        try:
+            with zipfile.ZipFile(file_path) as z:
+                members = [n for n in z.namelist() if not n.endswith('/')]
+                if len(members) == 1:
+                    h = hashlib.md5()
+                    with z.open(members[0]) as fh:
+                        for chunk in iter(lambda: fh.read(1 << 20), b''):
+                            h.update(chunk)
+                    candidates.append((h.hexdigest(), True))
+        except (zipfile.BadZipFile, OSError, RuntimeError):
+            pass
+    for md5, in_archive in candidates:
         hit = index.get(md5 or "")
         if hit:
-            return hit
+            # The DAT names the rom; what is on disk is still the container it
+            # was zipped into, so it keeps its own extension.
+            return hit.rsplit('.', 1)[0] + file_path.suffix if in_archive else hit
     return None
 
 def parse_dat(data):
@@ -1156,14 +1173,17 @@ def names_a_system(path):
     return (DIR_ALIASES.get(bare, bare) in SYSTEM_MAPPING
             or any(h in part for _, hints in CONTEXT_HINTS for h in hints))
 
-def folder_label(dir_name):
+def folder_label(dir_name, keep_disc=False):
     """The game a directory holds, from the directory's own name.
 
     Not game_stem(): a release folder is not a filename, so "ICO.and.Shadow.of
     .the.Colossus.PS3 DUPLEX" must keep everything after its last dot. A leading
     list index goes ("52. Digimon World" -> "Digimon World") and "(Disc 1)" goes
-    with it, so the discs of one game still land in one folder."""
-    return _strip_tags(re.sub(r'^\d+\s*[.\-_)]\s*', '', dir_name))
+    with it, so the discs of one game still land in one folder -- unless
+    `keep_disc`, when the whole name is kept because the files inside cannot
+    tell the discs apart on their own."""
+    stripped = re.sub(r'^\d+\s*[.\-_)]\s*', '', dir_name)
+    return stripped if keep_disc else _strip_tags(stripped)
 
 def build_destination_path(dest_base, system, file_name, is_bios=False, force_folder=False):
     """Builds the destination path: /dest/roms/{platform}/ or /dest/bios/{platform}/."""
@@ -1473,7 +1493,11 @@ def main():
         # The directory names the game, never a file inside it. Six preconfigured
         # Tomb Raider folders all ship "OpenLara.exe", and every repack ships
         # "Setup.exe" -- naming by file collapses unrelated games into one folder.
-        label = '' if names_a_system(parent) else folder_label(parent.name)
+        # "(Disc 2)" only comes off when the files inside say which disc they
+        # are. A gdi rip's "track01.bin" doesn't, so both discs would land in one
+        # folder and disc 2's index would point at disc 1's tracks.
+        keep_disc = any(GENERIC_STEM.match(game_stem(p.name)) for p in roms)
+        label = '' if names_a_system(parent) else folder_label(parent.name, keep_disc)
         if not label:
             # The directory sorts games rather than being one ("PSX/"), so the
             # files are all there is to go on.
