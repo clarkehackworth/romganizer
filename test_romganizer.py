@@ -402,6 +402,62 @@ def test_folder_marker_claims_a_whole_rip():
         assert 'skipped: 0' in r.stdout, r.stdout
 
 
+def test_wiiu_dump_travels_as_one_folder():
+    """code/cos.xml names the title: without it the content/ tree gets filed one
+    nameless asset at a time, flat into roms/wiiu/."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src, dest = root / 'src', root / 'dest'
+        rip = src / 'WiiU (US) Library' / 'Mario Kart 8 (US)' / 'Mario Kart 8 (US)[Loadline]'
+        for f in ('code/cos.xml', 'code/app.xml', 'code/Turbo.rpx',
+                  'content/ai/AIRivalTable.byaml', 'content/audio/body/SNDG_B_Amb.bars',
+                  'content/course/Gwii/course.kcl', 'meta/iconTex.tga'):
+            touch(rip / f)
+        r = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / 'romganizer.py'),
+             str(src), str(dest), '--mode', 'copy'], capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout
+        out = dest / 'roms' / 'wiiu' / 'Mario Kart 8 (US)[Loadline]'
+        assert (out / 'content' / 'course' / 'Gwii' / 'course.kcl').exists(), r.stdout
+        assert (out / 'meta' / 'iconTex.tga').exists(), r.stdout
+        assert not (dest / 'roms' / 'wiiu' / 'course.kcl').exists(), r.stdout
+
+
+def test_a_bios_pack_is_never_a_game_folder():
+    """A RetroArch system/ tree is loose firmware in named directories, which
+    looks exactly like a game folder. .rom names no machine on its own either."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src, dest = root / 'src', root / 'dest'
+        sysd = src / 'Retroarch BIOS Pack' / 'system'
+        touch(sysd / 'Machines' / 'Shared Roms' / 'MSX.rom')
+        touch(sysd / 'Machines' / 'SVI - Spectravideo SVI-318' / 'svi318.rom')
+        touch(sysd / '5200.rom')
+        r = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / 'romganizer.py'),
+             str(src), str(dest), '--mode', 'copy'], capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout
+        assert (dest / 'bios' / 'Machines' / 'Shared Roms' / 'MSX.rom').exists(), r.stdout
+        assert (dest / 'bios' / '5200.rom').exists(), r.stdout
+        assert not (dest / 'roms' / 'atari2600').exists(), r.stdout
+
+
+def test_a_part_file_is_not_a_dump():
+    """An incomplete download rides along with a game folder unless it is
+    dropped at the scan: moving it out from under the client breaks the transfer."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src, dest = root / 'src', root / 'dest'
+        touch(src / 'psx' / 'Games' / 'Tomba (USA).cue', b'FILE "Tomba (USA).bin" BINARY\n')
+        touch(src / 'psx' / 'Games' / 'Tomba (USA).bin')
+        touch(src / 'psx' / 'Games' / 'Tom and Jerry (USA).7z.part')
+        r = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / 'romganizer.py'),
+             str(src), str(dest), '--mode', 'copy'], capture_output=True, text=True)
+        assert not list(dest.rglob('*.part')), r.stdout
+        assert (src / 'psx' / 'Games' / 'Tom and Jerry (USA).7z.part').exists(), r.stdout
+
+
 def test_game_ships_with_its_dlc():
     """A title and its unlock package are one unit; two unrelated titles are not."""
     with tempfile.TemporaryDirectory() as td:

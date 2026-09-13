@@ -79,7 +79,7 @@ SYSTEM_MAPPING = {
     'arcade': ['.7z'],  # .zip files handled dynamically via file-inspection
     'atari800': ['.atr', '.xfd', '.xex', '.car'],  # .xex shared with xbox360, .car with atari5200
     'atarist': ['.st', '.msa'],
-    'atari2600': ['.a26', '.rom', '.bin'],
+    'atari2600': ['.a26', '.bin'],  # .rom is shared with MSX/Coleco/SVI/PC-98
     'atari5200': ['.a52', '.car'],
     'atari7800': ['.a78'],
     'atarijaguar': ['.j64', '.jag'],
@@ -146,7 +146,7 @@ BIOS_JUNK_EXTS = NON_ROM_EXTS - {'.dat'}
 
 # .7z is arcade only in a MAME context; everywhere else it is just a container
 # someone zipped a dump into, so it must never outweigh the path or the contents.
-AMBIGUOUS_EXTS = {'.m3u', '.bin', '.cue', '.chd', '.xex', '.7z'} | {
+AMBIGUOUS_EXTS = {'.m3u', '.bin', '.cue', '.chd', '.xex', '.7z', '.rom'} | {
     e for e in {e for exts in SYSTEM_MAPPING.values() for e in exts}
     if sum(e in exts for exts in SYSTEM_MAPPING.values()) > 1
 }
@@ -167,6 +167,12 @@ def _disc_cnf(path):
     except OSError:
         return 'psx'
 
+def _wiiu_cos(path):
+    """code/cos.xml is the boot descriptor of an unpacked Wii U title. The rest
+    of the dump (content/, meta/) is thousands of files with no telling
+    extension, so without this the tree gets filed one asset at a time."""
+    return 'wiiu' if path.parent.name.lower() == 'code' else None
+
 def _param_sfo(path):
     """PARAM.SFO means PS3 only directly inside PS3_GAME. PSP savedata and PSP
     games carry one too, and those are not a disc rip."""
@@ -178,6 +184,7 @@ FOLDER_MARKERS = {
     'param.sfo': _param_sfo,
     'default.xbe': 'xbox',
     'default.xex': 'xbox360',
+    'cos.xml': _wiiu_cos,
 }
 
 # "Collection.zip.001", "Collection.zip.002", "set.z01": one archive cut into
@@ -1386,7 +1393,7 @@ def main():
         if not marker:
             continue
         root = p.parent
-        while root.name.upper() in ('PS3_GAME', 'PS3_UPDATE', 'USRDIR'):
+        while root.name.upper() in ('PS3_GAME', 'PS3_UPDATE', 'USRDIR', 'CODE'):
             root = root.parent  # the marker sits inside the rip, not at its root
         marker_roots[root] = marker
         # The folder name is the release name; keep it verbatim rather than
@@ -1404,6 +1411,12 @@ def main():
             # A folder move bypasses classify(), which is the only thing keeping
             # nvram, save states and mame cfg out of the library. Guard it here
             # too, or "saves/mame/mame2003/cfg/" lands in "roms/arcade/cfg/".
+            continue
+        if bios_root(parent / '_'):
+            # Same bypass, same fix for firmware: a RetroArch system/ pack is a
+            # pile of loose roms in named directories, which looks exactly like a
+            # game folder. Left ungated, "system/Machines/Shared Roms/MSX.rom"
+            # travels into roms/ as a game instead of staying firmware.
             continue
         if system_dir_root(parent / 'x') == parent:
             # "roms/<system>/" sorts games, it is never one of them. A library
@@ -1478,6 +1491,12 @@ def main():
             # A folder move bypasses classify(), which is the only thing keeping
             # nvram, save states and mame cfg out of the library. Guard it here
             # too, or "saves/mame/mame2003/cfg/" lands in "roms/arcade/cfg/".
+            continue
+        if bios_root(parent / '_'):
+            # Same bypass, same fix for firmware: a RetroArch system/ pack is a
+            # pile of loose roms in named directories, which looks exactly like a
+            # game folder. Left ungated, "system/Machines/Shared Roms/MSX.rom"
+            # travels into roms/ as a game instead of staying firmware.
             continue
         if holds_a_dump(parent):
             continue  # a library the rule above already judged
@@ -1568,7 +1587,9 @@ def main():
         # The tree moved whole, saves included -- one rename is the entire point
         # of this path. Put those back afterwards, so a folder unit leaves the
         # same files behind as the per-file loop would.
-        strays = [p for p in members if in_saves(p)]
+        # ".part" rides along too: a download still in flight is not a dump, and
+        # moving it out from under the client breaks the transfer.
+        strays = [p for p in members if in_saves(p) or p.suffix.lower() == '.part']
         if strays and not args.dry_run:
             for p in strays:
                 try:
@@ -1582,7 +1603,9 @@ def main():
             skipped_exts.add(p.suffix.lower() or '(no extension)')
             changelog.append({"source": str(p), "destination": "N/A", "action": "skip",
                               "status": "SKIP",
-                              "reason": "a save, state or nvram file, not a dump"})
+                              "reason": "a download still in flight, not a dump"
+                              if p.suffix.lower() == '.part'
+                              else "a save, state or nvram file, not a dump"})
             unit_done.add(p)
 
         tag = f"[{args.mode.upper()}]"
@@ -1756,6 +1779,10 @@ def main():
                 identical = bool(source_hash and dest_hash and source_hash == dest_hash)
             if identical:
                 target_dir = dest_base / "duplicates" / system
+                if media_note:
+                    # Artwork keeps the subpath it was headed for: flattened,
+                    # "boxart/1942.png" and "snap/1942.png" land on each other.
+                    target_dir /= folder_dest[0].relative_to(dest_base / 'roms' / system)
                 dest_path = target_dir / file_path.name
                 action_taken = "duplicate_isolate"
                 log_reason = ("Cryptographically identical duplicate copy detected" if source_hash
@@ -1778,6 +1805,8 @@ def main():
                     organized = True
                 else:
                     target_dir = dest_base / "extra" / system
+                    if media_note:
+                        target_dir /= folder_dest[0].relative_to(dest_base / 'roms' / system)
                     dest_path = target_dir / file_path.name
                     action_taken, log_reason = "extra_isolate", "Name collision identified; unique hash variant preserved safely"
                     summary["extra"] += 1
