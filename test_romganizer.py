@@ -321,6 +321,35 @@ def test_game_folder_moves_as_a_unit():
         assert not (src / 'TOP 100 PLAYSTATION1 GAMES' / 'Digimon World (USA)').exists(), r.stdout
 
 
+def test_archive_unpacked_for_systems_that_cannot_read_one():
+    """A switch .zip is unpacked into its game folder; an arcade .zip stays a .zip."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src, dest = root / 'src', root / 'dest'
+        game = src / 'Switch' / 'Metroid Dread (USA).zip'
+        game.parent.mkdir(parents=True)
+        with zipfile.ZipFile(game, 'w') as z:
+            z.writestr('Metroid Dread (USA).nsp', 'rom' * 100)
+        touch(src / 'mame' / 'sf2.zip', b'PK\x03\x04' + b'\0' * 60)
+
+        r = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / 'romganizer.py'),
+             str(src), str(dest), '--mode', 'copy'], capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout
+        folder = dest / 'roms' / 'switch' / 'Metroid Dread (USA)'
+        assert (folder / 'Metroid Dread (USA).nsp').exists(), r.stdout
+        assert not (dest / 'roms' / 'switch' / 'Metroid Dread (USA).zip').exists(), r.stdout
+        # a system whose emulator reads archives keeps the archive
+        assert (dest / 'roms' / 'arcade' / 'sf2.zip').exists(), r.stdout
+
+        # move mode consumes the archive, same as every other move
+        r = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / 'romganizer.py'),
+             str(src), str(root / 'dest2'), '--mode', 'move'], capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout
+        assert not game.exists(), r.stdout
+
+
 def test_folder_marker_claims_a_whole_rip():
     """A PS3 rip has no telling extension anywhere; PS3_DISC.SFB names the folder."""
     with tempfile.TemporaryDirectory() as td:
@@ -728,7 +757,8 @@ def test_track_files_are_named_by_their_folder():
         assert not (dc / 'track01').exists()
 
 
-def test_scraped_media_follows_its_library():
+def test_scraped_media_is_left_behind():
+    """roms/<system>/media/ is dropped; anything else below the library follows."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         lib = root / 'backup' / 'roms' / 'atari2600'
@@ -741,7 +771,7 @@ def test_scraped_media_follows_its_library():
              str(root / 'backup'), str(root / 'dest')], capture_output=True, text=True)
         out = root / 'dest' / 'roms' / 'atari2600'
         assert (out / 'Pitfall! (USA).a26').exists()
-        assert (out / 'media' / 'box3d' / 'Pitfall! (USA).png').exists()
+        assert not (out / 'media').exists()
         assert (out / 'snap' / 'Pitfall! (USA).png').exists()
         assert not (out / 'gamelist.xml').exists()
 
@@ -1023,13 +1053,13 @@ def test_saves_beside_their_rom_are_not_carried_with_the_library():
         touch(lib / 'Super Metroid.sfc')
         touch(lib / 'Super Metroid.srm')          # battery save, loose beside it
         touch(lib / 'Super Metroid.state1')       # numbered RetroArch slot
-        touch(lib / 'media' / 'Super Metroid.png')  # real scraped media
+        touch(lib / 'media' / 'Super Metroid.png')  # scraped media: dropped
         subprocess.run(
             [sys.executable, str(Path(__file__).parent / 'romganizer.py'),
              str(root / 'src'), str(root / 'dest')], capture_output=True, text=True)
         dest = root / 'dest'
         assert list(dest.rglob('Super Metroid.sfc')), "the rom itself must move"
-        assert list(dest.rglob('Super Metroid.png')), "scraped media must still be carried"
+        assert not list(dest.rglob('Super Metroid.png')), "scraped media must be left behind"
         assert not list(dest.rglob('*.srm')), "a battery save must be left in place"
         assert not list(dest.rglob('*.state1')), "a numbered save state must be left in place"
         assert (lib / 'Super Metroid.srm').exists(), "and left where the emulator expects it"

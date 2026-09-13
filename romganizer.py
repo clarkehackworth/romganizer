@@ -627,6 +627,39 @@ EXTRACTORS = {
     ]),
 }
 
+# Emulators that cannot load an archive: the image has to land unpacked. Every
+# other system stays archived on purpose -- a nes/snes/gb core reads a zip or 7z
+# directly, and arcade romsets ARE .zip/.7z, so unpacking those would break them.
+NO_ARCHIVE_SYSTEMS = {'psx', 'ps2', 'ps3', 'ngc', 'switch'}
+ARCHIVE_EXTS = {'.zip', '.7z', '.rar'}
+
+def extract_archive(src, out_dir):
+    """Unpack src into out_dir. True on success, False if nothing could read it.
+
+    stdlib zipfile for .zip (it sanitizes member paths, so no traversal), and the
+    same 7z/unrar binaries sniffing already depends on for the rest."""
+    ext = src.suffix.lower()
+    if ext == '.zip':
+        try:
+            with zipfile.ZipFile(src) as z:
+                z.extractall(out_dir)
+            return True
+        except (OSError, zipfile.BadZipFile, NotImplementedError):
+            return False
+    for tool in ARCHIVE_TOOLS.get(ext, ()):
+        if not shutil.which(tool):
+            continue
+        argv = (['unrar', 'x', '-y', str(src), f'{out_dir}{os.sep}'] if tool == 'unrar'
+                else [tool, 'x', '-y', f'-o{out_dir}', str(src)])
+        try:
+            # A disc image takes a while; its output is a progress bar nobody reads.
+            if subprocess.run(argv, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=3600).returncode == 0:
+                return True
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return False
+
 # Nothing here can be read at all: no seekable format, no tool.
 SEALED_EXTS = {'.gz', '.wbfs'}
 
@@ -885,6 +918,12 @@ def system_dir_root(file_path):
         if part == 'roms' and re.sub(r'[^a-z0-9]', '', lowered[i + 1]):
             return Path(*file_path.parts[:i + 2])
     return None
+
+def in_system_media(file_path):
+    """roms/<system>/media/...: box art, snaps, videos and gamelists a frontend
+    scrapes for itself. Not dumps, and gigabytes of them, so they stay put."""
+    library = system_dir_root(file_path)
+    return bool(library) and 'media' in (p.lower() for p in file_path.relative_to(library).parts)
 
 def _hint_votes(file_path, candidates):
     """System hints per path component, innermost first. The filename and its own
@@ -1498,10 +1537,9 @@ def main():
             folder_dest = None  # bios keeps its own root, game folder or not
         media_note = None
         if system == 'unknown' and not folder_dest and not in_saves(file_path):
-            # Box art, snaps, wheels and gamelists already filed under
-            # "roms/<system>/media/..." belong to the roms being moved out from
-            # under them. Carried at the same relative path, or the library
-            # moves and everything a frontend scraped for it stays behind.
+            # Anything else already sitting below "roms/<system>/" belongs to the
+            # roms being moved out from under it, so it is carried at the same
+            # relative path. (media/ itself is dropped above.)
             library = system_dir_root(file_path)
             if library and file_path.parent != library:
                 system = system_dir(file_path)
@@ -1513,6 +1551,17 @@ def main():
             file_size = file_path.stat().st_size
         except OSError:
             file_size = 0
+
+        if in_system_media(file_path):
+            progress_clear()
+            print(f"[SKIP] {file_path.resolve()}")
+            print(f"{'->':>6} scraped media, left in place")
+            summary["skipped"] += 1
+            skipped_exts.add(file_path.suffix.lower() or "(no extension)")
+            changelog.append({"source": str(file_path), "destination": "N/A",
+                              "action": "skip", "status": "SKIP",
+                              "reason": "Scraped media under roms/<system>/media/"})
+            continue
 
         if system in ['unknown', 'ambiguous']:
             # 'unknown' = extension isn't a ROM at all (.png, .cfg) -- not an error.
@@ -1532,6 +1581,67 @@ def main():
             skipped_exts.add(file_path.suffix.lower() or "(no extension)")
             changelog.append({"source": str(file_path), "destination": "N/A", "action": "skip", "status": status, "reason": reason})
             continue
+
+        # An archive holding a disc image for a system whose emulator can't read
+        # one: unpack it into its game folder instead of filing the archive.
+        if (not is_bios and system in NO_ARCHIVE_SYSTEMS
+                and file_path.suffix.lower() in ARCHIVE_EXTS and not folder_dest):
+            unpack_dir, _ = build_destination_path(dest_base, system, file_path.name,
+                                                   force_folder=True)
+            members = archive_crcs(file_path)
+            try:  # 7z's listing reports sizes as text
+                need = sum(int(sz) for sz, _ in members.values()) if members else 0
+            except (TypeError, ValueError):
+                need = 0
+            need = need or file_size * EXTRACT_FACTOR
+            probe = dest_base
+            while not probe.exists() and probe.parent != probe:
+                probe = probe.parent
+            try:
+                free = shutil.disk_usage(probe).free
+            except OSError:
+                free = need
+            if unpack_dir.exists() or unpack_dir in claimed_dirs:
+                pass  # something already lives there; the normal path handles it
+            elif free < need:
+                progress_clear()
+                print(f"[WARN] {file_path.name}: need {_size(need)} to unpack it, "
+                      f"{_size(free)} free; filing the archive as-is")
+            else:
+                progress_clear()
+                print(f"[EXTRACT] {file_path.resolve()}")
+                print(f"{'->':>10} {unpack_dir.resolve()}{os.sep}")
+                ok = True
+                if not args.dry_run:
+                    unpack_dir.mkdir(parents=True, exist_ok=True)
+                    ok = extract_archive(file_path, unpack_dir)
+                    if ok and args.mode == 'move':
+                        # Move mode consumes the source everywhere else too.
+                        try:
+                            file_path.unlink()
+                        except OSError:
+                            pass
+                    elif not ok:
+                        shutil.rmtree(unpack_dir, ignore_errors=True)
+                if ok:
+                    claimed_dirs.add(unpack_dir)
+                    summary["organized"] += 1
+                    bytes_by["organized"] += need
+                    row = by_system.setdefault(system, [0, 0])
+                    row[0] += 1
+                    row[1] += need
+                    changelog.append({
+                        "source": str(file_path), "destination": str(unpack_dir),
+                        "action": "extract",
+                        "status": "SIMULATED" if args.dry_run else "EXECUTED",
+                        "reason": f"{system} emulators cannot read an archive; unpacked"})
+                    continue
+                # Nothing could read it -- a truncated download, or no 7z
+                # installed. Fall through and file the archive as-is rather
+                # than leaving the dump nowhere.
+                progress_clear()
+                print(f"[WARN] Could not unpack {file_path.name}; filing the archive as-is")
+                notes[file_path] = "Archive could not be unpacked; filed as-is"
 
         firmware_root = bios_root(file_path) if is_bios else None
         if folder_dest:

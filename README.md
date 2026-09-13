@@ -133,6 +133,14 @@ folder breaks the tie (otherwise `ambiguous`).
 | `.chd` | unpacked to a temp copy | `chdman` |
 | `.rvz` | unpacked to a temp copy | `dolphin-tool` |
 
+A `.zip`, `.7z` or `.rar` holding a **psx, ps2, ps3, gamecube or switch** dump is
+unpacked into its game folder instead of being filed as an archive -- those
+emulators can't read one. Every other system keeps the archive: nes/snes/gb cores
+load a zip directly, and an arcade romset *is* a zip. Unpacking is skipped (and
+the archive filed as-is) if the destination folder already exists, if the disk is
+too small for the contents, or if no tool can read it. In move mode the archive is
+deleted once it's unpacked.
+
 The first four are cheap and always run. The last two are not — they need temp
 space the size of the game — so they only run for a file that nothing cheaper
 could place, and only if the tool is installed. A `.chd` sitting in a folder named
@@ -194,9 +202,11 @@ collide.
 
 Two things do move, at the same relative path they were found at:
 
-- **Scraped media.** Box art, snaps, wheels and gamelists already under
-  `roms/<system>/media/...` belong to the ROMs being moved out from under them, so
-  they are carried across intact.
+- **Library sidecars.** Anything else already sitting below `roms/<system>/`
+  (a `snap/` folder, per-game configs) belongs to the ROMs being moved out from
+  under it, so it is carried across at the same relative path. `roms/<system>/media/`
+  is the exception: box art, snaps, videos and gamelists are skipped and left in
+  place, since a frontend rescrapes them and they are gigabytes of not-a-dump.
 - **BIOS packs.** Firmware under a `bios/` or `system/` directory keeps the layout
   below it (`system/vice/PET/chargen`, `keropi/iplrom.dat`), because that's the path
   the emulator looks for it at. Firmware carries every extension there is, so the
