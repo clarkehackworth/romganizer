@@ -718,6 +718,58 @@ def test_dat_resolves_name_collision():
         assert (dest / 'roms' / 'nes' / 'Legend of Zelda, The (USA) (Rev B).nes').exists(), r.stdout
 
 
+def test_the_dat_verified_copy_takes_the_name():
+    """Two copies of one game can share the canonical name and differ in bytes,
+    and then the name settles nothing. Whichever sorted first used to keep the
+    library slot; the DAT says which one is the real dump."""
+    with tempfile.TemporaryDirectory() as td:
+        import hashlib
+        root = Path(td)
+        src, dest = root / 'src', root / 'dest'
+        for sub, body in (('a_backup', b'a bad dump of zelda'), ('b_nointro', b'the good dump')):
+            (src / sub).mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(src / sub / 'Zelda.zip', 'w') as z:
+                z.writestr('Zelda.nes', body)
+        md5 = hashlib.md5(b'the good dump').hexdigest()
+        (root / 'nointro.dat').write_text(
+            '<datafile><game name="Zelda"><rom name="Zelda.nes" '
+            f'md5="{md5.upper()}"/></game></datafile>')
+        r = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / 'romganizer.py'), str(src), str(dest),
+             '--mode', 'copy', '--dat', str(root / 'nointro.dat')], capture_output=True, text=True)
+        kept = dest / 'roms' / 'nes' / 'Zelda.zip'
+        assert kept.exists(), r.stdout
+        with zipfile.ZipFile(kept) as z:
+            assert z.read('Zelda.nes') == b'the good dump', "the verified dump must hold the name"
+        with zipfile.ZipFile(dest / 'extra' / 'nes' / 'Zelda.zip') as z:
+            assert z.read('Zelda.nes') == b'a bad dump of zelda', "the evicted copy is kept, not lost"
+        log = json.loads((dest / 'rom_organization_changelog.json').read_text())
+        actions = {Path(e['source']).parent.name: (e['action'], e['reason']) for e in log}
+        assert actions['a_backup'][0] == 'extra_isolate', actions
+        assert 'DAT-verified' in actions['a_backup'][1], actions
+        assert actions['b_nointro'][0] == 'copy', actions
+        assert 'organized: 1' in r.stdout and 'extra: 1' in r.stdout, r.stdout
+
+
+def test_a_recompressed_archive_is_still_the_same_dump():
+    """The same rom zipped by two tools differs by a few hundred bytes of
+    container. A size mismatch proves nothing there -- the stored CRCs do."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src, dest = root / 'src', root / 'dest'
+        for sub, level in (('a', zipfile.ZIP_STORED), ('b', zipfile.ZIP_DEFLATED)):
+            (src / sub).mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(src / sub / 'Mario.zip', 'w', level) as z:
+                z.writestr('Mario.nes', b'NES\x1a' + b'rom payload' * 400)
+        a, b = src / 'a' / 'Mario.zip', src / 'b' / 'Mario.zip'
+        assert a.stat().st_size != b.stat().st_size, "fixture must differ in size"
+        r = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / 'romganizer.py'),
+             str(src), str(dest), '--mode', 'copy'], capture_output=True, text=True)
+        assert (dest / 'duplicates' / 'nes' / 'Mario.zip').exists(), r.stdout
+        assert not (dest / 'extra').exists(), "same payload is a duplicate, not a unique variant"
+
+
 def test_dat_matches_a_rom_inside_its_zip():
     """A DAT's md5 is of the rom, not of the zip someone put it in, so every
     zipped dump misses the DAT unless the member is hashed. The file on disk is

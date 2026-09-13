@@ -374,9 +374,9 @@ def archive_crcs(file_path):
 def quick_compare(a, b, trust_mtime=False):
     """False when size alone proves they differ, None when only a hash can tell.
 
-    A size mismatch is proof, and it is the cheap case worth catching: reading
-    two multi-GB images over NFS to learn they differ in length was the single
-    most expensive thing this script did.
+    A size mismatch is proof for anything but an archive, and it is the cheap
+    case worth catching: reading two multi-GB images over NFS to learn they
+    differ in length was the single most expensive thing this script did.
 
     Equal size plus equal mtime is NOT proof -- a bulk copy stamps a whole
     collection with the same mtime, so two different revisions of equal length
@@ -396,17 +396,21 @@ def quick_compare(a, b, trust_mtime=False):
         sa, sb = a.stat(), b.stat()
     except OSError:
         return None
-    if sa.st_size != sb.st_size:
-        return False
-    # NFS and FAT round mtime differently on either side, so compare whole seconds.
-    if trust_mtime and int(sa.st_mtime) == int(sb.st_mtime):
-        return True
+    # Archives first, because for them a size mismatch proves nothing: the same
+    # rom zipped by two tools differs by a few hundred bytes of container while
+    # the payload is byte-identical. The CRCs are in the central directory, so
+    # this costs a few KB either way and settles it outright.
     if a.suffix.lower() == b.suffix.lower():
         ca = archive_crcs(a)
         if ca is not None:
             cb = archive_crcs(b)
             if cb is not None:
                 return ca == cb
+    if sa.st_size != sb.st_size:
+        return False
+    # NFS and FAT round mtime differently on either side, so compare whole seconds.
+    if trust_mtime and int(sa.st_mtime) == int(sb.st_mtime):
+        return True
     return None
 
 def header_size(file_path):
@@ -1589,11 +1593,59 @@ def main():
     progress_clear()
     claimed = {}       # destination file -> source file that claimed it
     claimed_dirs = set()
+    entries = {}       # destination file -> its changelog entry, for a later rewrite
+    verified_cache = {}
 
     def occupant(path):
         """What is already at `path`: the file on disk, or the source about to
         be written there by this run."""
         return path if path.exists() else claimed.get(path)
+
+    def dat_verified(path, system):
+        """Does a DAT vouch for the dump at `path`?"""
+        if path not in verified_cache:
+            md5 = calculate_hash(path)
+            hit = dat_lookup(dat_index, path, md5)
+            if not hit and args.dat_auto:
+                if system not in auto_dats:
+                    auto_dats[system] = fetch_dat(system)
+                hit = dat_lookup(auto_dats[system], path, md5)
+            verified_cache[path] = bool(hit)
+        return verified_cache[path]
+
+    def evict(path, system):
+        """Move whatever holds `path` into extra/, so a dump the DAT vouches for
+        can take the name instead of the copy that merely got there first."""
+        loser = claimed.pop(path, None) or path   # claimed this run, or already on disk
+        spare = dest_base / "extra" / system / path.name
+        n = 1
+        while occupant(spare) is not None:
+            spare = spare.with_name(f"{path.stem}_{n}{path.suffix}")
+            n += 1
+        # In move mode the source is already gone, so weigh whatever holds the
+        # bytes right now: the destination, or the source in a dry run.
+        holding = path if path.exists() else loser
+        size = holding.stat().st_size if holding.exists() else 0
+        if not args.dry_run:
+            spare.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(path), str(spare))
+        claimed[spare] = loser
+        reason = "Displaced by a DAT-verified copy of the same dump"
+        entry = entries.pop(path, None)
+        if entry is None:
+            # It was in the library before this run started.
+            entry = {"source": str(path), "status": "SIMULATED" if args.dry_run else "EXECUTED"}
+            changelog.append(entry)
+        else:
+            summary["organized"] -= 1
+            bytes_by["organized"] -= size
+            if system in by_system:
+                by_system[system][0] -= 1
+                by_system[system][1] -= size
+        entry.update({"destination": str(spare), "action": "extra_isolate", "reason": reason})
+        entries[spare] = entry
+        summary["extra"] += 1
+        bytes_by["extra"] += size
 
     unit_done = set()
     for parent in sorted(dir_dest, key=lambda p: len(p.parts)):
@@ -1839,10 +1891,22 @@ def main():
                 if canonical:
                     # The DAT names the exact revision, so this was never a real
                     # collision -- only two files that shared a bad name.
-                    target_dir, dest_path = build_destination_path(dest_base, system, canonical, is_bios)
-                    action_taken, log_reason = args.mode, f"Name collision resolved by DAT match: {canonical}"
-                    organized = True
-                else:
+                    target_dir, canon_dest = build_destination_path(dest_base, system, canonical, is_bios)
+                    holder = occupant(canon_dest)
+                    if holder is not None and not dat_verified(holder, system):
+                        # Two copies of one dump really can share the canonical
+                        # name and differ in bytes, and then the name settles
+                        # nothing. The DAT does: it vouches for this one and not
+                        # for whichever copy happened to sort first.
+                        evict(canon_dest, system)
+                        holder = None
+                    if holder is None:
+                        dest_path = canon_dest
+                        action_taken, log_reason = args.mode, f"Name collision resolved by DAT match: {canonical}"
+                        organized = True
+                    else:
+                        canonical = None   # the incumbent is verified too; quarantine this one
+                if not canonical:
                     target_dir = dest_base / "extra" / system
                     if media_note:
                         target_dir /= folder_dest[0].relative_to(dest_base / 'roms' / system)
@@ -1896,7 +1960,10 @@ def main():
             tag = f"[{action_taken.upper()}]"
             print(f"{tag} {file_path.resolve()}")
             print(f"{'->':>{len(tag)}} {final_dest.resolve()}")
-        changelog.append({"source": str(file_path), "destination": str(final_dest), "action": action_taken, "status": status, "reason": log_reason})
+        entry = {"source": str(file_path), "destination": str(final_dest),
+                 "action": action_taken, "status": status, "reason": log_reason}
+        entries[final_dest] = entry
+        changelog.append(entry)
 
     progress_clear()
     if staging.exists():
