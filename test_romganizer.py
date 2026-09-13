@@ -423,6 +423,35 @@ def test_wiiu_dump_travels_as_one_folder():
         assert not (dest / 'roms' / 'wiiu' / 'course.kcl').exists(), r.stdout
 
 
+def test_an_arcade_set_is_not_an_atari_cart():
+    """A MAME or Neo Geo set is a bag of .bin chip dumps, and .bin is listed
+    under atari2600. Firmware in a bios/ directory stays firmware whatever its
+    members look like."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src, dest = root / 'src', root / 'dest'
+        def zipped(path, members):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(path, 'w') as z:
+                for m in members:
+                    z.writestr(m, b'chip')
+            return path
+        zipped(src / 'neo-geo-mvs-romset' / 'viewpoin.zip',
+               ['053-c1.c1', '053-p1.p1', '053-s1.bin'])
+        zipped(src / 'MAME (bios-devices)' / 'decobsmt.zip', ['bsmt.bin', 'u1.bin'])
+        zipped(src / 'Batocera' / 'bios' / 'maciix.zip', ['341-0732.bin', '264-1914.bin'])
+        zipped(src / 'Atari - 2600' / 'Combat (USA).zip', ['Combat (USA).a26'])
+        r = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / 'romganizer.py'),
+             str(src), str(dest), '--mode', 'copy'], capture_output=True, text=True)
+        assert not (dest / 'roms' / 'atari2600' / 'viewpoin.zip').exists(), r.stdout
+        assert (dest / 'roms' / 'neogeo' / 'viewpoin.zip').exists(), r.stdout
+        assert (dest / 'roms' / 'arcade' / 'decobsmt.zip').exists(), r.stdout
+        assert (dest / 'bios' / 'maciix.zip').exists(), r.stdout
+        # A member that really does name a machine still beats the folder.
+        assert (dest / 'roms' / 'atari2600' / 'Combat (USA).zip').exists(), r.stdout
+
+
 def test_a_bios_pack_is_never_a_game_folder():
     """A RetroArch system/ tree is loose firmware in named directories, which
     looks exactly like a game folder. .rom names no machine on its own either."""

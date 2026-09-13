@@ -560,7 +560,13 @@ def inspect_zip(file_path):
                     return 'bios', None
                 for system, exts in SYSTEM_MAPPING.items():
                     for ext in exts:
-                        if name.endswith(ext):
+                        # A shared extension names nothing from inside a
+                        # container: a MAME or Neo Geo set is a bag of .bin chip
+                        # dumps, and .bin is listed under atari2600, so without
+                        # this every arcade set files itself as a 2600 cart.
+                        # ponytail: a zipped .cue/.bin disc falls to arcade too;
+                        # the path still overrides, revisit if that shows up.
+                        if ext not in AMBIGUOUS_EXTS and name.endswith(ext):
                             return system, ext
             return 'arcade', '.zip'
     except zipfile.BadZipFile:
@@ -1020,6 +1026,11 @@ def classify(file_path, deep=False):
         # Nothing else identified it, so all we know is that it is a bios.
         if system in ('unknown', 'ambiguous'):
             system = 'bios'
+        elif in_bios and evidence == [f'zip={system}']:
+            # Sitting in a bios directory outweighs a guess made from what the
+            # zip happens to hold: "bios/maciix.zip" is firmware, whatever its
+            # members look like. A path that named a system dir still wins.
+            system = 'bios'
         evidence = ['name=bios'] + evidence
     return system, evidence
 
@@ -1054,10 +1065,14 @@ def _classify(file_path, deep=False):
         # Outranks the contents too, so it is answered before reading the file.
         return named, [f'roms/{named}/=system dir(+{W_SYSTEM_DIR})']
     if ext == '.zip':
-        system, _ = inspect_zip(file_path)
+        system, inner = inspect_zip(file_path)
         # "bios" names no machine -- a multi-system pack looks like that -- so
-        # keep scoring and let the path say which shelf it belongs on.
-        if system and system != 'bios':
+        # keep scoring and let the path say which shelf it belongs on. An
+        # `inner` of '.zip' means nothing inside was recognised either and
+        # arcade is only the fallback, so it gets the same treatment rather than
+        # overruling "Nintendo - Game Boy Advance/" with a guess. A real member
+        # match (.a26, .nes) still beats any folder name.
+        if system and system != 'bios' and inner != '.zip':
             return system, [f'zip={system}']
 
     sniffed = sniff_cue(file_path) if ext == '.cue' else sniff(file_path, deep)
