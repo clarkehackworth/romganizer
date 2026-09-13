@@ -19,6 +19,8 @@ import urllib.request
 import urllib.parse
 from pathlib import Path
 
+__version__ = "1.0.0"
+
 # Cartridge sets come from No-Intro via the libretro mirror (clrmamepro text);
 # disc sets come from redump.org, which serves a zipped Logiqx XML. Both carry
 # an md5 per rom, which is what calculate_hash already produces on a collision.
@@ -1182,6 +1184,7 @@ def build_destination_path(dest_base, system, file_name, is_bios=False, force_fo
 
 def main():
     parser = argparse.ArgumentParser(description="ROM library organizer.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("source", nargs='+', help="One or more source directories, files, or globs containing unorganized assets")
     parser.add_argument("dest", help="Destination base path library folder")
     parser.add_argument("--dry-run", action="store_true", help="Simulate execution pathways safely")

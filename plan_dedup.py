@@ -58,7 +58,14 @@ def score(path):
             len(re.findall(r'[A-Za-z]{3,}', stem)),         # actual words
             -len(Path(path).parts))                         # shallower path
 
-def main(dups_pkl, out_sh):
+def main(dups_pkl=None, out_sh=None):
+    if dups_pkl is None:
+        try:
+            dups_pkl, out_sh = sys.argv[1], sys.argv[2]
+        except IndexError:
+            print("usage: plan_dedup.py <duplicates.pkl> <delete.sh>",
+                  file=sys.stderr)
+            sys.exit(1)
     dups = pickle.load(open(dups_pkl, 'rb'))
     lines, freed = [], 0
     kept_back = {'CD track': 0, 'arcade CHD': 0, 'firmware': 0, 'named in a .cue': 0}

@@ -222,6 +222,17 @@ Two things do move, at the same relative path they were found at:
   the emulator looks for it at. Firmware carries every extension there is, so the
   directory is the signal, not the extension.
 
+
+## Install
+
+```
+pip install .            # or: pipx install .
+```
+
+Installs three console commands — `romganizer`, `find-dups`, `plan-dedup` — and
+a version banner (`romganizer --version`). Everything still runs in place from
+the checkout (`python3 romganizer.py ...`) with no install at all.
+
 ## Companion scripts
 
 Two standalone scripts for the other half of the job — finding copies that the
@@ -231,6 +242,8 @@ organizer can't see, because they don't share a name:
 python3 find_dups.py <candidates.pkl> <dups.pkl>    # identical bytes, different names
 python3 plan_dedup.py <dups.pkl> <delete.sh>        # turn that into a reviewable script
 ```
+
+(Installed builds expose the same pair as `find-dups` and `plan-dedup`.)
 
 `find_dups.py` takes a pickled `{size: [paths]}` mapping of same-size candidates and
 narrows it in three passes — size, first 4 MB, full MD5 — so the full read only
@@ -244,14 +257,17 @@ anything a sibling `.cue`/`.gdi`/`.m3u` names by hand.
 ## Tests
 
 ```
-python3 test_romganizer.py
-python3 test_progress.py
+python3 -m pytest
 ```
+
+(The two standalone scripts, `test_romganizer.py` and `test_progress.py`, still run
+under `python3 <file>` too.)
 
 ## Requirements
 
-Python 3.7+, standard library only — see `requirements.txt`.
+Python 3.7+ (3.8+ when installed as a package), standard library only — see
+`requirements.txt`.
 
-## License
+n## License
 
 MIT — see [LICENSE](LICENSE).

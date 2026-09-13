@@ -39,7 +39,14 @@ def narrow(groups, limit, label):
         out += [v for k, v in by.items() if k and len(v) > 1]
     return out
 
-def main(cand_pkl, out_pkl):
+def main(cand_pkl=None, out_pkl=None):
+    if cand_pkl is None:
+        try:
+            cand_pkl, out_pkl = sys.argv[1], sys.argv[2]
+        except IndexError:
+            print("usage: find_dups.py <candidates.pkl> <duplicates_out.pkl>",
+                  file=sys.stderr)
+            sys.exit(1)
     cand = pickle.load(open(cand_pkl, 'rb'))
     groups = [[f for f in v if Path(f).suffix.lower() not in ARCH
                and not any(m in f for m in INTENTIONAL)] for v in cand.values()]
