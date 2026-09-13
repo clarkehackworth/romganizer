@@ -231,3 +231,7 @@ python3 test_progress.py
 ## Requirements
 
 Python 3.7+, standard library only — see `requirements.txt`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
