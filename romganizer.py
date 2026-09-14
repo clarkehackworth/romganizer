@@ -349,8 +349,11 @@ def archive_crcs(file_path):
         if tool == 'unrar' or not shutil.which(tool):
             continue
         try:
-            out = subprocess.run([tool, 'l', '-ba', '-slt', str(file_path)],
-                                 timeout=120, capture_output=True, text=True,
+            # -p, and stdin closed: a header-encrypted archive asks for a
+            # password otherwise, and nothing would ever answer it.
+            out = subprocess.run([tool, 'l', '-ba', '-slt', '-p', str(file_path)],
+                                 timeout=120, stdin=subprocess.DEVNULL,
+                                 capture_output=True, text=True,
                                  errors='replace').stdout
         except (OSError, subprocess.SubprocessError):
             continue
@@ -683,11 +686,14 @@ def extract_archive(src, out_dir):
     for tool in ARCHIVE_TOOLS.get(ext, ()):
         if not shutil.which(tool):
             continue
-        argv = (['unrar', 'x', '-y', str(src), f'{out_dir}{os.sep}'] if tool == 'unrar'
-                else [tool, 'x', '-y', f'-o{out_dir}', str(src)])
+        # "-p"/"-p-": an encrypted member otherwise stops to ask for a password
+        # on a terminal whose output is going to DEVNULL, and the whole run hangs
+        # on an invisible prompt. Refuse instead, and let it be filed sealed.
+        argv = (['unrar', 'x', '-y', '-p-', str(src), f'{out_dir}{os.sep}'] if tool == 'unrar'
+                else [tool, 'x', '-y', '-p', f'-o{out_dir}', str(src)])
         try:
             # A disc image takes a while; its output is a progress bar nobody reads.
-            if subprocess.run(argv, stdout=subprocess.DEVNULL,
+            if subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL, timeout=3600).returncode == 0:
                 return True
         except (OSError, subprocess.SubprocessError):
@@ -815,16 +821,22 @@ def sniff_archive(file_path):
     for tool in ARCHIVE_TOOLS[file_path.suffix.lower()]:
         if not shutil.which(tool):
             continue
+        # Same no-password flag as everywhere else: an encrypted member must
+        # fail here rather than stop the run on a prompt nobody can see.
+        nopw = ['-p-'] if tool == 'unrar' else ['-p']
         listing, extract = ((['lb'], ['p', '-inul']) if tool == 'unrar'
                             else (['l', '-ba', '-slt'], ['e', '-so']))
+        listing, extract = listing + nopw, extract + nopw
         try:
             out = subprocess.run([tool] + listing + [str(file_path)], timeout=60,
+                                 stdin=subprocess.DEVNULL,
                                  capture_output=True, text=True, errors='replace').stdout
             names = [l[7:].strip() for l in out.splitlines() if l.startswith('Path = ')]
             names = names or [l.strip() for l in out.splitlines() if l.strip()]
             if not names:
                 return ()
             proc = subprocess.Popen([tool] + extract + [str(file_path), names[0]],
+                                    stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             try:
                 systems = sniff_stream(io.BytesIO(proc.stdout.read(ARCHIVE_PEEK)))
@@ -882,7 +894,7 @@ def sniff_extracted(file_path):
             try:
                 # Output is never read, and chdman redraws a progress bar for up
                 # to half an hour: capturing it buffers all of that for nothing.
-                subprocess.run(argv, stdout=subprocess.DEVNULL,
+                subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, timeout=1800)
             except (OSError, subprocess.SubprocessError):
                 continue
@@ -1311,20 +1323,24 @@ def main():
     # off the path alone, and folder grouping, DAT matching and duplicate
     # detection all see one opaque blob. Unpack it into staging on the
     # destination filesystem (so the real move is a rename) and identify what was
-    # actually inside. Arcade and NeoGeo are the exception: MAME loads those sets
-    # AS .7z, so they stay sealed.
+    # actually inside.
+    #
+    # Only where it buys something, though. Unpacking is destructive in move
+    # mode -- the archive is consumed and its contents filed loose -- so it is
+    # reserved for the systems whose emulators cannot read an archive at all
+    # (which the placement phase would unpack anyway) and for archives the path
+    # could not name, where looking inside is the only way to place them. A
+    # snes/ or nes/ .7z is already identified and stays a .7z.
     staging = dest_base / '.romganizer-staging'
-    sealed = ('arcade', 'neogeo')
-    # The path decides what stays sealed, not the contents: a MAME set's members
-    # are bare .rom/.bin files that classify as anything at all, so only "mame/"
-    # or "arcade/" above it can be trusted to say "this IS the romset".
     todo = [p for p in files if p.suffix.lower() == '.7z'
-            and resolved[p] not in sealed
-            and not set(_hint_votes(p, set())) & set(sealed)]
+            and (resolved[p] in NO_ARCHIVE_SYSTEMS
+                 or resolved[p] in ('unknown', 'ambiguous'))]
     dropped, added = set(), []
     start = time.monotonic()
     for i, arc in enumerate(todo, 1):
-        progress("Unpacking", i - 1, len(todo), start=start)
+        # The name matters here: one multi-GB archive can hold the bar at the
+        # same count for a long time, and a bare "0/7394" reads as a hang.
+        progress(f"Unpacking {arc.name[:40]}", i - 1, len(todo), start=start)
         members = archive_crcs(arc)
         try:  # 7z's listing reports sizes as text
             need = sum(int(sz) for sz, _ in members.values()) if members else 0

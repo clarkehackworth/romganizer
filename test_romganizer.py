@@ -8,12 +8,13 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+import threading
 import zlib
 from pathlib import Path
 
 from romganizer import (CONTEXT_HINTS, SYSTEM_MAPPING, archive_crcs, bios_root, in_saves, quick_compare,
                         build_destination_path, classify, dat_lookup,
-                        determine_system, fetch_dat, header_size, is_bios_name,
+                        determine_system, extract_archive, fetch_dat, header_size, is_bios_name,
                         is_smd, parse_dat, smd_md5, sniff)
 
 
@@ -352,7 +353,9 @@ def test_archive_unpacked_for_systems_that_cannot_read_one():
 
 def test_7z_is_unpacked_before_identification():
     """A .7z is opaque to grouping and dup detection, so it is unpacked first --
-    except an arcade set, which MAME loads as the .7z itself."""
+    but only where that buys something. An arcade set MAME loads as the .7z
+    itself, and a snes/ .7z is already identified by its path, so unpacking it
+    would only consume it to learn what was already known."""
     if not shutil.which('7z'):
         print('    (skipped: 7z not installed)')
         return
@@ -361,10 +364,14 @@ def test_7z_is_unpacked_before_identification():
         src, dest, build = root / 'src', root / 'dest', root / 'build'
         (src / 'PS2').mkdir(parents=True)
         (src / 'mame').mkdir(parents=True)
+        (src / 'snes').mkdir(parents=True)
         touch(build / 'Sly Cooper (USA).iso', b'\0' * 3000)
         touch(build / 'sf2.rom', b'\0' * 500)
+        touch(build / 'Chrono Trigger (USA).sfc', b'\0' * 700)
         for member, into in ((build / 'Sly Cooper (USA).iso', src / 'PS2' / 'Sly Cooper (USA).7z'),
-                             (build / 'sf2.rom', src / 'mame' / 'sf2.7z')):
+                             (build / 'sf2.rom', src / 'mame' / 'sf2.7z'),
+                             (build / 'Chrono Trigger (USA).sfc',
+                              src / 'snes' / 'Chrono Trigger (USA).7z')):
             subprocess.run(['7z', 'a', str(into), str(member)], capture_output=True, check=True)
 
         r = subprocess.run(
@@ -373,6 +380,10 @@ def test_7z_is_unpacked_before_identification():
         assert r.returncode == 0, r.stdout
         # the ps2 archive: unpacked, and the path hint above it survived the trip
         assert (dest / 'roms' / 'ps2' / 'Sly Cooper (USA)' / 'Sly Cooper (USA).iso').exists(), r.stdout
+        # the snes archive: an emulator reads it as-is, so it stays a .7z
+        assert (dest / 'roms' / 'snes' / 'Chrono Trigger (USA).7z').exists(), r.stdout
+        assert not (dest / 'roms' / 'snes' / 'Chrono Trigger (USA).sfc').exists(), r.stdout
+        assert (src / 'snes' / 'Chrono Trigger (USA).7z').exists() is False, "moved, not consumed"
         assert not (src / 'PS2' / 'Sly Cooper (USA).7z').exists(), r.stdout
         # the arcade set stays sealed
         assert list(dest.rglob('sf2.7z')), r.stdout
@@ -1249,6 +1260,29 @@ def test_sevenzip_pairs_are_compared_on_their_header():
         assert quick_compare(a, b) is True
         if a.stat().st_size == c.stat().st_size:
             assert quick_compare(a, c) is False
+
+
+def test_an_encrypted_archive_never_waits_for_a_password():
+    """7z stops to ask for a password on an encrypted member. Its output goes to
+    DEVNULL, so the prompt is invisible and the whole run hangs on it."""
+    if not shutil.which('7z'):
+        return
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        touch(root / 'Game.3ds', b'payload' * 100)
+        arc = root / 'Game.7z'
+        subprocess.run(['7z', 'a', '-y', '-psecret', '-mhe=on', str(arc), str(root / 'Game.3ds')],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=True)
+        out = root / 'out'
+        out.mkdir()
+        # Would block forever on a terminal, so a timeout is the assertion.
+        done = []
+        t = threading.Thread(target=lambda: done.append(extract_archive(arc, out)), daemon=True)
+        t.start()
+        t.join(30)
+        assert not t.is_alive(), "extract_archive blocked on a password prompt"
+        assert done == [False], done
 
 
 def test_unreadable_archive_falls_through_to_the_hash():
